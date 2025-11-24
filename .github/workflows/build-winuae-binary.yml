@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       Configuration:
-        descripion: "Type of binary build"
+        description: "Type of binary build"
         required: true
-        default: "Test"
+        default: "Release"
         type: choice
         options:
         - Release
@@ -15,7 +15,7 @@ on:
       Platform:
         description: "Platform to build for"
         required: true
-        default: "Win32"
+        default: "x64"
         type: choice
         options:
         - Win32
