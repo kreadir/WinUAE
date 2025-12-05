@@ -40,6 +40,8 @@
 #include "gfxboard.h"
 
 #define ENABLE_MULTITHREADED_DENISE 1
+#define FMODE64_HACK 0
+
 extern int multithread_enabled;
 #define MULTITHREADED_DENISE (ENABLE_MULTITHREADED_DENISE && multithread_enabled != 0)
 
@@ -110,6 +112,7 @@ static struct denise_rga_queue rga_queue[DENISE_RGA_SLOT_CHUNKS];
 static struct denise_rga_queue temp_line;
 static struct denise_rga_queue *this_line;
 static volatile bool thread_debug_lock;
+static bool full_line_draw;
 
 static void denise_handle_quick_strobe(uae_u16 strobe, int offset, int vpos);
 static void draw_denise_vsync(int);
@@ -164,7 +167,7 @@ static void read_denise_line_queue(void)
 	} else if (q->type == 1) {
 		draw_denise_bitplane_line_fast(q->gfx_ypos, q->how, q->ls);
 	} else if (q->type == 2) {
-		draw_denise_border_line_fast(q->gfx_ypos, q->how, q->ls);
+		draw_denise_border_line_fast(q->gfx_ypos, q->blanked, q->how, q->ls);
 	} else if (q->type == 3) {
 		quick_denise_rga(q->linecnt, q->startpos, q->endpos);
 	} else if (q->type == 4) {
@@ -411,6 +414,9 @@ static int linear_denise_frame_hbstrt, linear_denise_frame_hbstop;
 static int denise_visible_lines, denise_visible_lines_counted;
 static uae_u16 hbstrt_denise_reg, hbstop_denise_reg;
 static uae_u16 fmode_denise, denise_bplfmode, denise_sprfmode;
+#if FMODE64_HACK
+static int denise_bplfmode_max;
+#endif
 static bool denise_sprfmode64, denise_bplfmode64;
 static int bpldat_fmode;
 static int fetchmode_size_denise, fetchmode_mask_denise;
@@ -450,6 +456,9 @@ static uae_u16 clxcon_bpl_match_55, clxcon_bpl_match_aa;
 static int aga_delayed_color_idx;
 static uae_u16 aga_delayed_color_val, aga_delayed_color_con2, aga_delayed_color_con3;
 static int aga_unalign0, aga_unalign1, bpl1dat_unalign, reswitch_unalign;
+#if 0
+static int bplcon0_res_unalign, bplcon0_res_unalign_res;
+#endif
 static uae_u8 loaded_pix, loaded_pixs[4];
 static int hresolution, hresolution_inv, hresolution_add;
 static bool denise_sprite_blank_active;
@@ -1878,11 +1887,11 @@ static void lightpen_update(struct vidbuffer *vb, int lpnum)
 	}
 
 	if (currprefs.lightpen_crosshair && lightpen_active) {
-		for (int i = 0; i < LIGHTPEN_HEIGHT; i++) {
-			int line = lightpen_y[lpnum] + i - LIGHTPEN_HEIGHT / 2;
-			if (line >= 0 && line < max_ypos_thisframe1) {
-				if (lightpen_active & (1 << lpnum)) {
-					if (denise_lock()) {
+		if (denise_lock()) {
+			for (int i = 0; i < LIGHTPEN_HEIGHT; i++) {
+				int line = lightpen_y[lpnum] + i - LIGHTPEN_HEIGHT / 2;
+				if (line >= 0 && line < max_ypos_thisframe1) {
+					if (lightpen_active & (1 << lpnum)) {
 						draw_lightpen_cursor(vb->monitor_id, lightpen_x[lpnum], i, line, cx > 0, lpnum);
 					}
 				}
@@ -1921,7 +1930,7 @@ bool drawing_can_lineoptimizations(void)
 		currprefs.cs_color_burst || currprefs.gfx_grayscale || currprefs.monitoremu) {
 		return false;
 	}
-	if (lightpen_active || debug_dma >= 2 || debug_heatmap >= 2) {
+	if ((lightpen_active && currprefs.lightpen_crosshair) || debug_dma >= 2 || debug_heatmap >= 2) {
 		return false;
 	}
 	return true;
@@ -3162,21 +3171,6 @@ static void expand_bplcon1(uae_u16 v)
 	check_lts_request();
 }
 
-static void expand_bplcon0_early(uae_u16 v)
-{
-	if (!aga_mode) {
-		int ores = denise_res;
-		int nres = GET_RES_DENISE(v);
-		if (ores == RES_LORES && nres == RES_HIRES) {
-			if (ecs_denise) {
-				reswitch_unalign = 3;
-			} else {
-				reswitch_unalign = 3;
-			}
-		}
-	}
-}
-
 int gethresolution(void)
 {
 	return hresolution;
@@ -3203,6 +3197,50 @@ static void setlasthamcolor(void)
 	}
 }
 
+static void expand_bplcon0_early(uae_u16 v)
+{
+	if (!aga_mode) {
+
+		int ores = denise_res;
+		int nres = GET_RES_DENISE(v);
+		if (ores == RES_LORES && nres == RES_HIRES) {
+			if (ecs_denise) {
+				reswitch_unalign = 3;
+			} else {
+				reswitch_unalign = 3;
+			}
+		}
+
+	} else {
+
+#if 0
+		// shres resolution change in AGA is 1 lores pixel earlier
+		if (denise_res != GET_RES_DENISE(v)) {
+			bplcon0_res_unalign = true;
+			bplcon0_res_unalign_res = GET_RES_DENISE(v);
+			aga_unalign0 += 2;
+			aga_unalign1 += 2;
+		}
+#endif
+
+	}
+}
+
+#if 0
+static void expand_bplcon0_unaligned(void)
+{
+	bplcon0_res_unalign = false;
+	denise_res = bplcon0_res_unalign_res;
+	denise_res_size = 1 << denise_res;
+	sethresolution();
+	setbplmode();
+	update_fmode();
+	update_specials();
+	update_sprres();
+	check_lts_request();
+}
+#endif
+
 static void expand_bplcon0(uae_u16 v)
 {
 	uae_u16 old = bplcon0_denise;
@@ -3219,11 +3257,14 @@ static void expand_bplcon0(uae_u16 v)
 
 	bplcon0_denise = v;
 
-	if (denise_res != GET_RES_DENISE(bplcon0_denise) || denise_planes != GET_PLANES(bplcon0_denise)) {
+	if (denise_res != GET_RES_DENISE(bplcon0_denise)) {
 		lts_request = true;
 	}
 
-	int ores = denise_res;
+	if (denise_planes != GET_PLANES(bplcon0_denise)) {
+		lts_request = true;
+	}
+
 	denise_res = GET_RES_DENISE(bplcon0_denise);
 	denise_res_size = 1 << denise_res;
 	sethresolution();
@@ -3252,6 +3293,17 @@ static void expand_bplcon0(uae_u16 v)
 	check_lts_request();
 }
 
+#if FMODE64_HACK
+static uae_u64 make6416(uae_u32 v)
+{
+	return ((uae_u64)v << 48) | ((uae_u64)v << 32) | ((uae_u64)v << 16) | ((uae_u64)v);
+}
+static uae_u64 make6432(uae_u32 v)
+{
+	return ((uae_u64)v << 32) | ((uae_u64)v);
+}
+#endif
+
 static void expand_fmode(uae_u16 v)
 {
 	if (!aga_mode) {
@@ -3264,11 +3316,38 @@ static void expand_fmode(uae_u16 v)
 	denise_xposmask <<= 2;
 	denise_xposmask |= hresolution == RES_SUPERHIRES ? 3 : (hresolution == RES_HIRES ? 2 : 0);
 
+	int fm = denise_bplfmode;
 	denise_bplfmode = (v & 3) == 3 ? 2 : (v & 3) == 0 ? 0 : 1;
+#if FMODE64_HACK
+	if (fm != denise_bplfmode) {
+		if (!denise_bplfmode_max) {
+			if (fm < 2) {
+				for (int i = 0; i < MAX_PLANES; i++) {
+					if (fm == 1) {
+						bplxdat_64[i] = make6432(bplxdat[i]);
+						bplxdat2_64[i] = make6432(bplxdat2[i]);
+						bplxdat3_64[i] = make6432(bplxdat3[i]);
+					} else {
+						bplxdat_64[i] = make6416(bplxdat[i]);
+						bplxdat2_64[i] = make6416(bplxdat2[i]);
+						bplxdat3_64[i] = make6416(bplxdat3[i]);
+					}
+				}
+			}
+			lts_request = true;
+		}
+		denise_bplfmode_max = 2;
+	}
+#endif
 	v >>= 2;
 	denise_sprfmode = (v & 3) == 3 ? 2 : (v & 3) == 0 ? 0 : 1;
 	denise_sprfmode64 = denise_sprfmode == 2;
 	denise_bplfmode64 = denise_bplfmode == 2;
+#if FMODE64_HACK
+	if (denise_bplfmode_max) {
+		denise_bplfmode64 = true;
+	}
+#endif
 	update_fmode();
 	check_lts_request();
 }
@@ -3313,8 +3392,6 @@ static void expand_colmask(void)
 	if (clxcon_bpl_enable_o != clxcon_bpl_enable2 || clxcon_bpl_match_o != clxcon_bpl_match2) {
 		for (int i = 0; i < (aga_mode ? 256 : 64); i++) {
 			uae_u8 m = i & clxcon_bpl_enable;
-			uae_u8 odd = m & 0x55;
-			uae_u8 even = m & 0xaa;
 			if (m == (clxcon_bpl_enable2 & clxcon_bpl_match2) || bplalwayson) {
 				bplcoltable[i] = 0x0001;
 			} else {
@@ -3573,6 +3650,14 @@ static void hstart_new(void)
 		}
 #endif
 	}
+#if FMODE64_HACK
+	if (denise_bplfmode_max > 0) {
+		denise_bplfmode_max--;
+		if (!denise_bplfmode_max) {
+			select_lts();
+		}
+	}
+#endif
 }
 
 static void do_exthblankon_ecs(void)
@@ -3923,7 +4008,15 @@ static void expand_drga(struct denise_rga *rd)
 
 		case 0x110:
 		if (denise_bplfmode64) {
+#if FMODE64_HACK
+			if (denise_bplfmode < 2) {
+				bplxdat_64[0] = denise_bplfmode == 0 ? make6416(rd->v) : make6432(rd->v);
+			} else {
+				bplxdat_64[0] = rd->v64;
+			}
+#else
 			bplxdat_64[0] = rd->v64;
+#endif
 		} else {
 			bplxdat[0] = rd->v;
 		}
@@ -3941,10 +4034,21 @@ static void expand_drga(struct denise_rga *rd)
 		case 0x11a:
 		case 0x11c:
 		case 0x11e:
-		if (denise_bplfmode64) {
-			bplxdat_64[(rd->rga - 0x110) / 2] = rd->v64;
-		} else {
-			bplxdat[(rd->rga - 0x110) / 2] = rd->v;
+		{
+			int num = (rd->rga - 0x110) / 2;
+			if (denise_bplfmode64) {
+#if FMODE64_HACK
+				if (denise_bplfmode < 2) {
+					bplxdat_64[num] = denise_bplfmode == 0 ? make6416(rd->v) : make6432(rd->v);;
+				} else {
+					bplxdat_64[num] = rd->v64;
+				}
+#else
+				bplxdat_64[num] = rd->v64;
+#endif
+			} else {
+				bplxdat[num] = rd->v;
+			}
 		}
 		break;
 
@@ -5149,6 +5253,8 @@ void set_drawbuffer(void)
 	struct vidbuf_description *vidinfo = &adisplays[0].gfxvidinfo;
 
 	if (!drawing_can_lineoptimizations()) {
+		// full line is drawn because overlay graphics can be drawn on top of border and blanking
+		full_line_draw = true;
 		vidinfo->inbuffer = &vidinfo->tempbuffer;
 		struct vidbuffer *vb = &vidinfo->tempbuffer;
 		if (!vb->outwidth || !vb->outheight) {
@@ -5166,6 +5272,7 @@ void set_drawbuffer(void)
 			vb->monitor_id = vb2->monitor_id;
 		}
 	} else {
+		full_line_draw = false;
 		vidinfo->inbuffer = &vidinfo->drawbuffer;
 	}
 }
@@ -5951,6 +6058,10 @@ static void draw_denise_line(int gfx_ypos, enum nln_how how, uae_u32 linecnt, in
 #include "linetoscr_aga_fm0.cpp"
 #include "linetoscr_aga_fm1.cpp"
 #include "linetoscr_aga_fm2.cpp"
+#if FMODE64_HACK
+#include "linetoscr_aga_fm0_64.cpp"
+#include "linetoscr_aga_fm1_64.cpp"
+#endif
 #include "linetoscr_aga_fm0_genlock.cpp"
 #include "linetoscr_aga_fm1_genlock.cpp"
 #include "linetoscr_aga_fm2_genlock.cpp"
@@ -6030,6 +6141,11 @@ static void select_lts(void)
 					lts = linetoscr_aga_funcs[idx];
 				}
 			} else {
+#if FMODE64_HACK
+				if (denise_bplfmode_max && bpldat_fmode < 2) {
+					idx += 3 * 2 * 5 * 4 * 2 * 3 * 3;
+				}
+#endif
 				lts = linetoscr_aga_funcs[idx];
 			}
 		}
@@ -6167,6 +6283,11 @@ static void lts_unaligned_aga(int cnt, int cnt_next, int h)
 					aga_delayed_color_idx = -1;
 				}
 				bplmode = bplmode_new;
+#if 0
+				if (bplcon0_res_unalign) {
+					expand_bplcon0_unaligned();
+				}
+#endif
 
 			}
 			if (h) {
@@ -6313,6 +6434,7 @@ static void lts_unaligned_aga(int cnt, int cnt_next, int h)
 				gpix = spix;
 			}
 		}
+
 		dtbuf[h][ipix] = dpix_val;
 		dtgbuf[h][ipix] = gpix;
 
@@ -6500,6 +6622,7 @@ static void lts_unaligned_ecs(int cnt, int cnt_next, int h)
 				gpix = spix;
 			}
 		}
+
 		dtbuf[h][ipix] = dpix_val;
 		dtgbuf[h][ipix] = gpix;
 
@@ -6742,6 +6865,39 @@ static int l_shift(int v, int shift)
 	}
 }
 
+static void draw_blank_start(int len)
+{
+	if (len > 0 && buf1 < (uae_u32*)xlinebuffer_start) {
+		int d = (uae_u32*)xlinebuffer_start - buf1;
+		buf1 += d;
+		len -= d;
+	}
+	if (buf1 + len > (uae_u32*)xlinebuffer_end) {
+		len = (uae_u32*)xlinebuffer_end - buf1;
+	}
+	if (len > 0) {
+		memset(buf1, 0, len * sizeof(uae_u32));
+		if (buf2) {
+			memset(buf2, 0, len * sizeof(uae_u32));
+		}
+	}
+}
+static void draw_blank_end(void)
+{
+	if (buf1 < (uae_u32*)xlinebuffer_start) {
+		buf1 = (uae_u32*)xlinebuffer_start;
+	}
+	if (buf1 < (uae_u32*)xlinebuffer_end) {
+		int len = (uae_u32*)xlinebuffer_end - buf1;
+		if (len > 0) {
+			memset(buf1, 0, len * sizeof(uae_u32));
+			if (buf2) {
+				memset(buf2, 0, len * sizeof(uae_u32));
+			}
+		}
+	}
+}
+
 static void fill_border(int total, uae_u32 bgcol)
 {
 	if (buf2) {
@@ -6791,7 +6947,7 @@ static void fill_border(int total, uae_u32 bgcol)
 }
 
 // draw border from hb to hb
-void draw_denise_border_line_fast(int gfx_ypos, enum nln_how how, struct linestate *ls)
+void draw_denise_border_line_fast(int gfx_ypos, bool blank, enum nln_how how, struct linestate *ls)
 {
 	if (ls->strlong_seen) {
 		set_strlong();
@@ -6799,7 +6955,7 @@ void draw_denise_border_line_fast(int gfx_ypos, enum nln_how how, struct linesta
 
 	get_line(0, gfx_ypos, how, ls->lol_shift_prev);
 
-	if (!buf1 && !ls->blankedline && denise_planes > 0) {
+	if (!buf1 && !ls->blankedline && denise_planes > 0 && !blank) {
 		resolution_count[denise_res]++;
 	}
 	lines_count++;
@@ -6836,36 +6992,48 @@ void draw_denise_border_line_fast(int gfx_ypos, enum nln_how how, struct linesta
 	buf1 = buf1p;
 	buf2 = buf2p;
 
-	int start = draw_startoffset;
-	if (start < hbstop_offset) {
-		int diff = hbstop_offset - start;
-		buf1 += diff;
+	if (blank)  {
+		memset(buf1, 0, xlinebuffer_end - (uae_u8*)buf1);
 		if (buf2) {
-			buf2 += diff;
+			memset(buf2, 0, xlinebuffer_end - (uae_u8 *)buf1);
 		}
-		if (gbufp) {
-			gbufp += diff;
+	} else {
+		if (full_line_draw) {
+			draw_blank_start(hbstop_offset);
 		}
-		start = hbstop_offset;
+		int start = draw_startoffset;
+		if (start < hbstop_offset) {
+			int diff = hbstop_offset - start;
+			buf1 += diff;
+			if (buf2) {
+				buf2 += diff;
+			}
+			if (gbufp) {
+				gbufp += diff;
+			}
+			start = hbstop_offset;
+		}
+		int end = draw_end > hbstrt_offset ? hbstrt_offset : draw_end;
+		int total = end - start;
+
+		fill_border(total, bgcol);
+		if (full_line_draw) {
+			draw_blank_end();
+		}
+
+		total = end - start;
+		if (need_genlock_data && gbuf && total) {
+			int max = addrdiff(xlinebuffer_genlock_end, gbufp);
+			total += GENLOCK_EXTRA_CLEAR;
+			if (total > max) {
+				total = max;
+			}
+			memset(gbufp, 0, total);
+		}
 	}
-	int end = draw_end > hbstrt_offset ? hbstrt_offset : draw_end;
-	int total = end - start;
-
-	fill_border(total, bgcol);
-
-	total = end - start;
-	if (need_genlock_data && gbuf && total) {
-		int max = addrdiff(xlinebuffer_genlock_end, gbufp);
-		total += GENLOCK_EXTRA_CLEAR;
-		if (total > max) {
-			total = max;
-		}
-		memset(gbufp, 0, total);
-	}
-
 }
 
-static int ltsf_init(int draw_start, int draw_startoffset, int *draw_end, int hbstrt_offset, int hbstop_offset, int bpl1dat_trigger_offset)
+static int ltsf_init(int draw_start, int draw_startoffset, int *draw_end, int hbstrt_offset, int hbstop_offset, int bpl1dat_trigger_offset, uae_u8 *buf_end, uae_u32 *buf1)
 {
 	int end = *draw_end;
 	if (end > hbstrt_offset) {
@@ -6881,7 +7049,7 @@ static int ltsf_init(int draw_start, int draw_startoffset, int *draw_end, int hb
 	if (cnt > bpl1dat_trigger_offset && bpl1dat_trigger_offset >= draw_start) {
 		cnt = bpl1dat_trigger_offset;
 	}
-	int max = addrdiff(xlinebuffer_end, (uae_u8*)buf1) / sizeof(uae_u32);
+	int max = addrdiff(buf_end, (uae_u8*)buf1) / sizeof(uae_u32);
 	int w = end - cnt;
 	if (w > max) {
 		end -= w - max;
@@ -7126,14 +7294,17 @@ void draw_denise_bitplane_line_fast(int gfx_ypos, enum nln_how how, struct lines
 		buf1 = (uae_u32*)row_tmp8;
 		buf2 = (uae_u32*)row_tmp8;
 		int end = draw_startoffset;
-		int cnt = ltsf_init(draw_start, draw_startoffset, &end, hbstrt_offset, hbstop_offset, bpl1dat_trigger_offset);
+		int cnt = ltsf_init(draw_start, draw_startoffset, &end, hbstrt_offset, hbstop_offset, bpl1dat_trigger_offset, row_tmp8 + sizeof(row_tmp8), buf1);
 		ltsf(cnt, end, hbstrt_offset, hbstop_offset, hstrt_offset, hstop_offset, bpl1dat_trigger_offset,
 			planecnt, bgcol, &cp, &cp2, 1 << cpadd, cpadds, 1 << bufadd, ls);
 		draw_start = draw_startoffset;
 		buf1 = buf1p;
 		buf2 = buf2p;
 	}
-	int cnt = ltsf_init(draw_start, draw_startoffset, &draw_end, hbstrt_offset, hbstop_offset, bpl1dat_trigger_offset);
+	if (full_line_draw) {
+		draw_blank_start(hbstop_offset);
+	}
+	int cnt = ltsf_init(draw_start, draw_startoffset, &draw_end, hbstrt_offset, hbstop_offset, bpl1dat_trigger_offset, xlinebuffer_end, buf1);
 	ltsf(cnt, draw_end, hbstrt_offset, hbstop_offset, hstrt_offset, hstop_offset, bpl1dat_trigger_offset,
 		planecnt, bgcol, &cp, &cp2, 1 << cpadd, cpadds, 1 << bufadd, ls);
 
@@ -7158,6 +7329,10 @@ void draw_denise_bitplane_line_fast(int gfx_ypos, enum nln_how how, struct lines
 				}
 			}
 		}
+	}
+
+	if (full_line_draw) {
+		draw_blank_end();
 	}
 
 	// clear some more bytes to clear possible lightpen cursor graphics
@@ -7374,7 +7549,7 @@ static void addtowritequeue(void)
 	uae_sem_post(&write_sem);
 }
 
-void draw_denise_border_line_fast_queue(int gfx_ypos, enum nln_how how, struct linestate *ls)
+void draw_denise_border_line_fast_queue(int gfx_ypos, bool blank, enum nln_how how, struct linestate *ls)
 {
 	if (MULTITHREADED_DENISE) {
 		
@@ -7384,6 +7559,7 @@ void draw_denise_border_line_fast_queue(int gfx_ypos, enum nln_how how, struct l
 
 		struct denise_rga_queue *q = &rga_queue[rga_queue_write & DENISE_RGA_SLOT_CHUNKS_MASK];
 		q->gfx_ypos = gfx_ypos;
+		q->blanked = blank;
 		q->how = how;
 		q->ls = ls;
 		q->type = 2;
@@ -7395,7 +7571,7 @@ void draw_denise_border_line_fast_queue(int gfx_ypos, enum nln_how how, struct l
 	} else {
 	
 		updatelinedata();
-		draw_denise_border_line_fast(gfx_ypos, how, ls);
+		draw_denise_border_line_fast(gfx_ypos, blank, how, ls);
 	
 	}
 }
